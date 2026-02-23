@@ -46,13 +46,6 @@ import com.google.android.material.button.MaterialButton
 class StreamPlayerActivity : AppCompatActivity() {
 
     companion object {
-        const val EXTRA_STREAM_URL = "stream_url"
-        const val EXTRA_TITLE = "title"
-        const val EXTRA_PLAYLIST_URLS = "playlist_urls"
-        const val EXTRA_PLAYLIST_NAMES = "playlist_names"
-        const val EXTRA_START_INDEX = "start_index"
-        const val EXTRA_MUTED = "muted"
-
         private const val HIDE_CONTROLS_DELAY = 3000L
         private const val PLAY_DELAY_SECONDS = 5
 
@@ -119,15 +112,12 @@ class StreamPlayerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
 
-        // Odczytaj tryb wyciszenia
-        isMuted = intent.getBooleanExtra(EXTRA_MUTED, false)
-
         initViews()
         initPlayer()
         initGestureDetector()
 
-        // Załaduj playlistę lub pojedynczy plik (BEZ auto-play)
-        loadFromIntent()
+        // Załaduj playlistę z PlaylistHolder (BEZ auto-play)
+        loadFromPlaylistHolder()
     }
 
     override fun onPause() {
@@ -143,6 +133,7 @@ class StreamPlayerActivity : AppCompatActivity() {
         playHandler.removeCallbacksAndMessages(null)
         player.release()
         audioPlayer?.release()
+        PlaylistHolder.clear()
     }
 
     // =========================================================================
@@ -191,11 +182,6 @@ class StreamPlayerActivity : AppCompatActivity() {
             .build()
 
         playerView.player = player
-
-        // Wycisz wideo jeśli tryb bez dźwięku
-        if (isMuted) {
-            player.volume = 0f
-        }
 
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -277,24 +263,22 @@ class StreamPlayerActivity : AppCompatActivity() {
     // Load media (BEZ auto-play) + sliding window
     // =========================================================================
 
-    private fun loadFromIntent() {
-        playlistUrls = intent.getStringArrayExtra(EXTRA_PLAYLIST_URLS) ?: emptyArray()
-        playlistNames = intent.getStringArrayExtra(EXTRA_PLAYLIST_NAMES) ?: emptyArray()
-        val startIndex = intent.getIntExtra(EXTRA_START_INDEX, 0)
+    private fun loadFromPlaylistHolder() {
+        if (!PlaylistHolder.hasData()) {
+            Toast.makeText(this, getString(R.string.no_url), Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
 
-        if (playlistUrls.isEmpty()) {
-            // Pojedynczy plik
-            val url = intent.getStringExtra(EXTRA_STREAM_URL)
-            val title = intent.getStringExtra(EXTRA_TITLE) ?: "Video"
+        // Odczytaj dane z singletona
+        playlistUrls = PlaylistHolder.urls
+        playlistNames = PlaylistHolder.names
+        isMuted = PlaylistHolder.isMuted
+        val startIndex = PlaylistHolder.startIndex
 
-            if (url == null) {
-                Toast.makeText(this, getString(R.string.no_url), Toast.LENGTH_LONG).show()
-                finish()
-                return
-            }
-
-            playlistUrls = arrayOf(url)
-            playlistNames = arrayOf(title)
+        // Wycisz wideo jeśli tryb bez dźwięku
+        if (isMuted) {
+            player.volume = 0f
         }
 
         // Załaduj okno playlisty wokół startIndex (BEZ auto-play)

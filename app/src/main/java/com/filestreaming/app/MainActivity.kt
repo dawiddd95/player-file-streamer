@@ -336,17 +336,6 @@ class MainActivity : AppCompatActivity() {
     // =========================================================================
 
     private fun playFile(item: FileItem) {
-        val filePath = if (currentPath.isEmpty()) item.name
-                       else "$currentPath/${item.name}"
-
-        val streamUrl = "$baseUrl/media/${filePath.replace(" ", "%20")}"
-
-        val intent = Intent(this, StreamPlayerActivity::class.java).apply {
-            putExtra(StreamPlayerActivity.EXTRA_STREAM_URL, streamUrl)
-            putExtra(StreamPlayerActivity.EXTRA_TITLE, item.name)
-            putExtra(StreamPlayerActivity.EXTRA_MUTED, isMuted)
-        }
-
         // Pliki multimedialne w katalogu — posortowane wg wybranego trybu
         val mediaFiles = sortMediaFiles(
             fileList.filter { !it.isDirectory && isMediaFile(it.name) }
@@ -359,10 +348,13 @@ class MainActivity : AppCompatActivity() {
 
         val startIndex = mediaFiles.indexOfFirst { it.name == item.name }.coerceAtLeast(0)
 
-        intent.putExtra(StreamPlayerActivity.EXTRA_PLAYLIST_URLS, urls)
-        intent.putExtra(StreamPlayerActivity.EXTRA_PLAYLIST_NAMES, names)
-        intent.putExtra(StreamPlayerActivity.EXTRA_START_INDEX, startIndex)
+        // Zapisz playlistę w singletonie (zamiast Intent extras — unika limitu ~500KB)
+        PlaylistHolder.urls = urls
+        PlaylistHolder.names = names
+        PlaylistHolder.startIndex = startIndex
+        PlaylistHolder.isMuted = isMuted
 
+        val intent = Intent(this, StreamPlayerActivity::class.java)
         startActivity(intent)
     }
 
