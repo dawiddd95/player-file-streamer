@@ -1,12 +1,14 @@
 package com.filestreaming.app
 
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +23,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.google.android.material.button.MaterialButton
 
@@ -110,6 +113,10 @@ class StreamPlayerActivity : AppCompatActivity() {
     @OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // ── VR Cinema: pełny ekran jak skybox ──
+        setupCinemaMode()
+
         setContentView(R.layout.activity_player)
 
         initViews()
@@ -118,6 +125,14 @@ class StreamPlayerActivity : AppCompatActivity() {
 
         // Załaduj playlistę z PlaylistHolder (BEZ auto-play)
         loadFromPlaylistHolder()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Przywróć immersive fullscreen po powrocie (VR może zresetować)
+        if (isFullscreen) {
+            enterFullscreen()
+        }
     }
 
     override fun onPause() {
@@ -140,6 +155,25 @@ class StreamPlayerActivity : AppCompatActivity() {
     // Init
     // =========================================================================
 
+    /**
+     * Konfiguracja trybu kinowego VR — pełny ekran bez pasków,
+     * wideo wypełnia cały wyświetlacz jak skybox.
+     */
+    @Suppress("DEPRECATION")
+    private fun setupCinemaMode() {
+        // Ekran zawsze włączony — nie gaśnie w VR
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Pełny immersive mode — schowaj WSZYSTKO (status bar, navigation bar)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // Display cutout — rysuj też pod wycięciami ekranu (notch)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+    }
+
     private fun initViews() {
         playerView = findViewById(R.id.playerView)
         controlsPanel = findViewById(R.id.controlsPanel)
@@ -154,6 +188,9 @@ class StreamPlayerActivity : AppCompatActivity() {
         btnLoop = findViewById(R.id.btnLoop)
         btnRandom = findViewById(R.id.btnRandom)
         btnSelectAudio = findViewById(R.id.btnSelectAudio)
+
+        // VR Cinema: rozciągnij wideo na cały ekran jak skybox
+        playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
 
         btnPlayPause.setOnClickListener { togglePlayPause() }
         btnPrev.setOnClickListener { playPrevious() }
@@ -530,7 +567,9 @@ class StreamPlayerActivity : AppCompatActivity() {
     private fun enterFullscreen() {
         isFullscreen = true
         val controller = WindowCompat.getInsetsController(window, window.decorView)
+        // Schowaj WSZYSTKIE paski systemowe — immersive VR
         controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.hide(WindowInsetsCompat.Type.displayCutout())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         btnFullscreen.text = getString(R.string.window_mode)

@@ -11,6 +11,20 @@
         <item name="android:navigationBarColor">@color/background_dark</item>
     </style>
 
+    <!-- Pełny ekran jak kino VR / skybox — bez pasków, bez dekoracji -->
+    <style name="Theme.FileStreaming.Cinema" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/accent_blue</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorPrimaryContainer">@color/accent_blue</item>
+        <item name="colorSecondary">@color/accent_green</item>
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
     <style name="PlayerButton" parent="Widget.Material3.Button">
         <item name="android:textSize">14sp</item>
         <item name="android:textAllCaps">false</item>

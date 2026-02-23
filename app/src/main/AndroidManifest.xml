@@ -42,7 +42,8 @@
         <activity
             android:name=".StreamPlayerActivity"
             android:exported="false"
-            android:theme="@style/Theme.FileStreaming"
+            android:theme="@style/Theme.FileStreaming.Cinema"
+            android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
 
     </application>
