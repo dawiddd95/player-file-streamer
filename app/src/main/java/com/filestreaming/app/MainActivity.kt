@@ -1,0 +1,312 @@
+package com.filestreaming.app
+
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.os.Bundle
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import com.google.android.material.button.MaterialButton
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Ekran główny — przeglądarka plików na serwerze HTTP.
+ *
+ * Pozwala:
+ * - wpisać adres serwera (np. http://192.168.1.100:8080)
+ * - pobrać listę plików z endpointu /api/files
+ * - nawigować po katalogach
+ * - kliknąć plik, by streamować go w ExoPlayer
+ *
+ * Serwer powinien wystawiać:
+ *   GET /api/files?path=          → JSON z listą plików/katalogów
+ *   GET /media/<ścieżka do pliku> → sam plik (z obsługą Range)
+ */
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val PREFS_NAME = "file_streaming_prefs"
+        private const val KEY_SERVER_URL = "server_url"
+
+        private val MEDIA_EXTENSIONS = setOf(
+            "mp3", "mp4", "avi", "mkv", "flv", "wmv",
+            "mov", "m4v", "flac", "wav", "ogg", "aac",
+            "wma", "m4a", "webm", "3gp", "ts", "m2ts",
+            "m3u8"
+        )
+    }
+
+    private lateinit var prefs: SharedPreferences
+    private lateinit var urlInput: EditText
+    private lateinit var btnConnect: MaterialButton
+    private lateinit var recyclerView: RecyclerView
+    private lateinit var swipeRefresh: SwipeRefreshLayout
+    private lateinit var progressBar: ProgressBar
+    private lateinit var statusLabel: TextView
+    private lateinit var pathLabel: TextView
+    private lateinit var btnBack: MaterialButton
+    private lateinit var btnPlayAll: MaterialButton
+
+    private var baseUrl: String = ""
+    private var currentPath: String = ""
+    private var fileList: MutableList<FileItem> = mutableListOf()
+    private lateinit var adapter: FileAdapter
+
+    // =========================================================================
+    // Lifecycle
+    // =========================================================================
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        initViews()
+        setupRecyclerView()
+
+        // Przywróć ostatni adres
+        val savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.1.100:8080") ?: ""
+        urlInput.setText(savedUrl)
+    }
+
+    // =========================================================================
+    // Init
+    // =========================================================================
+
+    private fun initViews() {
+        urlInput = findViewById(R.id.urlInput)
+        btnConnect = findViewById(R.id.btnConnect)
+        recyclerView = findViewById(R.id.recyclerView)
+        swipeRefresh = findViewById(R.id.swipeRefresh)
+        progressBar = findViewById(R.id.progressBar)
+        statusLabel = findViewById(R.id.statusLabel)
+        pathLabel = findViewById(R.id.pathLabel)
+        btnBack = findViewById(R.id.btnBack)
+        btnPlayAll = findViewById(R.id.btnPlayAll)
+
+        btnConnect.setOnClickListener { connectToServer() }
+        btnBack.setOnClickListener { navigateUp() }
+        btnPlayAll.setOnClickListener { playAllFiles() }
+
+        swipeRefresh.setOnRefreshListener {
+            if (baseUrl.isNotEmpty()) {
+                fetchFiles(currentPath)
+            } else {
+                swipeRefresh.isRefreshing = false
+            }
+        }
+
+        // Obsługa "Enter" w polu URL
+        urlInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_DONE) {
+                connectToServer()
+                true
+            } else false
+        }
+    }
+
+    private fun setupRecyclerView() {
+        adapter = FileAdapter(fileList) { item ->
+            if (item.isDirectory) {
+                // Wejdź do katalogu
+                val newPath = if (currentPath.isEmpty()) item.name
+                              else "$currentPath/${item.name}"
+                fetchFiles(newPath)
+            } else {
+                // Streamuj plik
+                playFile(item)
+            }
+        }
+        recyclerView.layoutManager = LinearLayoutManager(this)
+        recyclerView.adapter = adapter
+    }
+
+    // =========================================================================
+    // Połączenie z serwerem
+    // =========================================================================
+
+    private fun connectToServer() {
+        val url = urlInput.text.toString().trim().trimEnd('/')
+        if (url.isEmpty()) {
+            Toast.makeText(this, getString(R.string.enter_url), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        baseUrl = url
+        currentPath = ""
+
+        // Zapisz URL
+        prefs.edit().putString(KEY_SERVER_URL, url).apply()
+
+        // Ukryj klawiaturę
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(urlInput.windowToken, 0)
+
+        fetchFiles("")
+    }
+
+    private fun fetchFiles(path: String) {
+        progressBar.visibility = View.VISIBLE
+        statusLabel.text = getString(R.string.connecting)
+
+        Thread {
+            try {
+                val encodedPath = path.replace(" ", "%20")
+                val apiUrl = if (encodedPath.isEmpty()) "$baseUrl/api/files"
+                             else "$baseUrl/api/files?path=$encodedPath"
+
+                val connection = URL(apiUrl).openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 10000
+                connection.readTimeout = 10000
+
+                val responseCode = connection.responseCode
+                if (responseCode != 200) {
+                    throw Exception("HTTP $responseCode")
+                }
+
+                val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                val response = reader.readText()
+                reader.close()
+                connection.disconnect()
+
+                val items = parseFileList(response)
+
+                runOnUiThread {
+                    currentPath = path
+                    fileList.clear()
+                    fileList.addAll(items)
+                    adapter.notifyDataSetChanged()
+
+                    progressBar.visibility = View.GONE
+                    swipeRefresh.isRefreshing = false
+
+                    val mediaCount = items.count { !it.isDirectory }
+                    statusLabel.text = getString(R.string.loaded_format, items.size, mediaCount)
+                    pathLabel.text = if (path.isEmpty()) "/" else "/$path"
+
+                    btnBack.visibility = if (path.isEmpty()) View.GONE else View.VISIBLE
+                    btnPlayAll.visibility = if (mediaCount > 0) View.VISIBLE else View.GONE
+                }
+
+            } catch (e: Exception) {
+                runOnUiThread {
+                    progressBar.visibility = View.GONE
+                    swipeRefresh.isRefreshing = false
+                    statusLabel.text = getString(R.string.error_format, e.message ?: "?")
+                    Toast.makeText(this, getString(R.string.connection_error), Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun parseFileList(json: String): List<FileItem> {
+        val items = mutableListOf<FileItem>()
+        val array = JSONArray(json)
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val name = obj.getString("name")
+            val isDir = obj.optBoolean("is_dir", false)
+            val size = obj.optLong("size", 0)
+
+            items.add(FileItem(name, isDir, size))
+        }
+
+        // Sortuj: katalogi na górze, potem pliki
+        return items.sortedWith(compareBy<FileItem> { !it.isDirectory }.thenBy { it.name.lowercase() })
+    }
+
+    // =========================================================================
+    // Nawigacja
+    // =========================================================================
+
+    private fun navigateUp() {
+        if (currentPath.isEmpty()) return
+
+        val parentPath = if (currentPath.contains("/")) {
+            currentPath.substringBeforeLast("/")
+        } else {
+            ""
+        }
+
+        fetchFiles(parentPath)
+    }
+
+    // =========================================================================
+    // Odtwarzanie
+    // =========================================================================
+
+    private fun playFile(item: FileItem) {
+        val filePath = if (currentPath.isEmpty()) item.name
+                       else "$currentPath/${item.name}"
+
+        val streamUrl = "$baseUrl/media/${filePath.replace(" ", "%20")}"
+
+        val intent = Intent(this, StreamPlayerActivity::class.java).apply {
+            putExtra(StreamPlayerActivity.EXTRA_STREAM_URL, streamUrl)
+            putExtra(StreamPlayerActivity.EXTRA_TITLE, item.name)
+        }
+
+        // Przekaż playlistę (wszystkie pliki multimedialne w katalogu)
+        val mediaFiles = fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        val urls = mediaFiles.map { f ->
+            val p = if (currentPath.isEmpty()) f.name else "$currentPath/${f.name}"
+            "$baseUrl/media/${p.replace(" ", "%20")}"
+        }.toTypedArray()
+        val names = mediaFiles.map { it.name }.toTypedArray()
+
+        val startIndex = mediaFiles.indexOfFirst { it.name == item.name }.coerceAtLeast(0)
+
+        intent.putExtra(StreamPlayerActivity.EXTRA_PLAYLIST_URLS, urls)
+        intent.putExtra(StreamPlayerActivity.EXTRA_PLAYLIST_NAMES, names)
+        intent.putExtra(StreamPlayerActivity.EXTRA_START_INDEX, startIndex)
+
+        startActivity(intent)
+    }
+
+    private fun playAllFiles() {
+        val mediaFiles = fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        if (mediaFiles.isEmpty()) {
+            Toast.makeText(this, getString(R.string.no_media_files), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Odtwórz od pierwszego
+        playFile(mediaFiles[0])
+    }
+
+    private fun isMediaFile(filename: String): Boolean {
+        val ext = filename.substringAfterLast('.', "").lowercase()
+        return ext in MEDIA_EXTENSIONS
+    }
+
+    // =========================================================================
+    // Back button
+    // =========================================================================
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (currentPath.isNotEmpty()) {
+            navigateUp()
+        } else {
+            super.onBackPressed()
+        }
+    }
+}
+
