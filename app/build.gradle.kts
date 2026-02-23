@@ -16,7 +16,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
+            isDebuggable = false
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
