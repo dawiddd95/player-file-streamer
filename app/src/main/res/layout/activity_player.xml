@@ -5,14 +5,14 @@
     android:layout_height="match_parent"
     android:background="@color/black">
 
-    <!-- Video Player View — fill = rozciąga na cały ekran jak skybox/kino VR -->
+    <!-- Video Player View — fit = skaluje proporcjonalnie do rozmiaru okna (kino VR) -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/playerView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         app:use_controller="false"
         app:show_buffering="when_playing"
-        app:resize_mode="fill"
+        app:resize_mode="fit"
         android:background="@color/black" />
 
     <!-- Controls Overlay Panel -->

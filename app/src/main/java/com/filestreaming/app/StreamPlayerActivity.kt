@@ -1,10 +1,12 @@
 package com.filestreaming.app
 
+import android.graphics.Point
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -156,8 +158,8 @@ class StreamPlayerActivity : AppCompatActivity() {
     // =========================================================================
 
     /**
-     * Konfiguracja trybu kinowego VR — pełny ekran bez pasków,
-     * wideo wypełnia cały wyświetlacz jak skybox.
+     * Konfiguracja trybu kinowego VR — maksymalnie duży panel/okno,
+     * pełny ekran bez pasków, wideo skalowane proporcjonalnie (fit).
      */
     @Suppress("DEPRECATION")
     private fun setupCinemaMode() {
@@ -171,6 +173,39 @@ class StreamPlayerActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+
+        // ── VR: rozciągnij okno/panel do max rozmiaru ekranu gogli ──
+        requestMaxWindowSize()
+    }
+
+    /**
+     * Programowo żąda maksymalnego rozmiaru okna na goglach VR.
+     * Na Quest 2D panel jest domyślnie mały — to go powiększa.
+     */
+    @Suppress("DEPRECATION")
+    private fun requestMaxWindowSize() {
+        try {
+            // Pobierz maksymalny rozmiar ekranu
+            val display: Display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display ?: windowManager.defaultDisplay
+            } else {
+                windowManager.defaultDisplay
+            }
+
+            val maxSize = Point()
+            display.getRealSize(maxSize)
+
+            // Ustaw okno na pełny rozmiar ekranu
+            val params = window.attributes
+            params.width = WindowManager.LayoutParams.MATCH_PARENT
+            params.height = WindowManager.LayoutParams.MATCH_PARENT
+            window.attributes = params
+
+            // Dodatkowe flagi pełnoekranowe
+            window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+        } catch (_: Exception) {
+            // Na zwykłym telefonie te flagi mogą nie zadziałać — ignorujemy
         }
     }
 
@@ -189,8 +224,8 @@ class StreamPlayerActivity : AppCompatActivity() {
         btnRandom = findViewById(R.id.btnRandom)
         btnSelectAudio = findViewById(R.id.btnSelectAudio)
 
-        // VR Cinema: rozciągnij wideo na cały ekran jak skybox
-        playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+        // VR Cinema: skaluj wideo proporcjonalnie do rozmiaru okna (fit)
+        playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
 
         btnPlayPause.setOnClickListener { togglePlayPause() }
         btnPrev.setOnClickListener { playPrevious() }

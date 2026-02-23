@@ -22,7 +22,9 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.FileStreaming"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:resizeableActivity="true"
+        android:largeHeap="true">
 
         <activity
             android:name=".LauncherActivity"
@@ -44,7 +46,16 @@
             android:exported="false"
             android:theme="@style/Theme.FileStreaming.Cinema"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+
+            <!-- VR: żądaj maksymalnie dużego okna/panelu na goglach -->
+            <layout
+                android:defaultWidth="2560dp"
+                android:defaultHeight="1440dp"
+                android:gravity="center"
+                android:minWidth="1920dp"
+                android:minHeight="1080dp" />
+        </activity>
 
     </application>
 
