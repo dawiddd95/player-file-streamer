@@ -39,6 +39,12 @@
     <string name="no_url">Brak adresu URL</string>
     <string name="last_file">To ostatni plik</string>
 
+    <!-- Background music -->
+    <string name="select_audio">🎵 Muzyka w tle</string>
+    <string name="audio_none">Muzyka: Brak</string>
+    <string name="audio_format">Muzyka: %1$s</string>
+    <string name="start_countdown">Start za %1$ds…</string>
+
     <!-- Common -->
     <string name="file_counter_format">%1$d / %2$d</string>
 </resources>

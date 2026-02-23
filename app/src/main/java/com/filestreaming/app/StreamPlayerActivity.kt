@@ -1,5 +1,6 @@
 package com.filestreaming.app
 
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -8,6 +9,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
@@ -31,6 +33,8 @@ import com.google.android.material.button.MaterialButton
  * - Pełny ekran z automatycznym ukrywaniem kontrolek
  * - Zapętlanie / losowa kolejność
  * - Przejdź do następnego / poprzedniego pliku
+ * - Muzyka w tle (drugi ExoPlayer) — wybór pliku audio z urządzenia
+ * - Start z 5-sekundowym opóźnieniem po kliknięciu Play
  */
 class StreamPlayerActivity : AppCompatActivity() {
 
@@ -42,10 +46,12 @@ class StreamPlayerActivity : AppCompatActivity() {
         const val EXTRA_START_INDEX = "start_index"
 
         private const val HIDE_CONTROLS_DELAY = 3000L
+        private const val PLAY_DELAY_SECONDS = 5
     }
 
     // --- Player ---
     private lateinit var player: ExoPlayer
+    private var audioPlayer: ExoPlayer? = null
 
     // --- UI ---
     private lateinit var playerView: PlayerView
@@ -53,12 +59,14 @@ class StreamPlayerActivity : AppCompatActivity() {
     private lateinit var titleLabel: TextView
     private lateinit var fileCounterLabel: TextView
     private lateinit var statusLabel: TextView
+    private lateinit var audioLabel: TextView
     private lateinit var btnPlayPause: MaterialButton
     private lateinit var btnPrev: MaterialButton
     private lateinit var btnNext: MaterialButton
     private lateinit var btnFullscreen: MaterialButton
     private lateinit var btnLoop: MaterialButton
     private lateinit var btnRandom: MaterialButton
+    private lateinit var btnSelectAudio: MaterialButton
 
     // --- State ---
     private var playlistUrls: Array<String> = emptyArray()
@@ -67,9 +75,19 @@ class StreamPlayerActivity : AppCompatActivity() {
     private var isRandomMode = false
     private var isFullscreen = false
     private var controlsVisible = true
+    private var backgroundAudioUri: Uri? = null
 
     private val hideHandler = Handler(Looper.getMainLooper())
     private val hideRunnable = Runnable { hideControls() }
+
+    private val playHandler = Handler(Looper.getMainLooper())
+    private var countdownSeconds = 0
+
+    // --- Activity Result Launcher for audio file picker ---
+    private val pickAudio =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let { onAudioPicked(it) }
+        }
 
     // =========================================================================
     // Lifecycle
@@ -84,19 +102,23 @@ class StreamPlayerActivity : AppCompatActivity() {
         initPlayer()
         initGestureDetector()
 
-        // Załaduj playlistę lub pojedynczy plik
+        // Załaduj playlistę lub pojedynczy plik (BEZ auto-play)
         loadFromIntent()
     }
 
     override fun onPause() {
         super.onPause()
         player.pause()
+        audioPlayer?.pause()
+        playHandler.removeCallbacksAndMessages(null)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         hideHandler.removeCallbacks(hideRunnable)
+        playHandler.removeCallbacksAndMessages(null)
         player.release()
+        audioPlayer?.release()
     }
 
     // =========================================================================
@@ -109,12 +131,14 @@ class StreamPlayerActivity : AppCompatActivity() {
         titleLabel = findViewById(R.id.titleLabel)
         fileCounterLabel = findViewById(R.id.fileCounterLabel)
         statusLabel = findViewById(R.id.statusLabel)
+        audioLabel = findViewById(R.id.audioLabel)
         btnPlayPause = findViewById(R.id.btnPlayPause)
         btnPrev = findViewById(R.id.btnPrev)
         btnNext = findViewById(R.id.btnNext)
         btnFullscreen = findViewById(R.id.btnFullscreen)
         btnLoop = findViewById(R.id.btnLoop)
         btnRandom = findViewById(R.id.btnRandom)
+        btnSelectAudio = findViewById(R.id.btnSelectAudio)
 
         btnPlayPause.setOnClickListener { togglePlayPause() }
         btnPrev.setOnClickListener { playPrevious() }
@@ -122,6 +146,7 @@ class StreamPlayerActivity : AppCompatActivity() {
         btnFullscreen.setOnClickListener { toggleFullscreen() }
         btnLoop.setOnClickListener { toggleLoop() }
         btnRandom.setOnClickListener { toggleRandom() }
+        btnSelectAudio.setOnClickListener { pickAudio.launch(arrayOf("audio/*")) }
     }
 
     @OptIn(UnstableApi::class)
@@ -202,7 +227,7 @@ class StreamPlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Load media
+    // Load media (BEZ auto-play)
     // =========================================================================
 
     private fun loadFromIntent() {
@@ -225,36 +250,123 @@ class StreamPlayerActivity : AppCompatActivity() {
             playlistNames = arrayOf(title)
         }
 
-        // Załaduj playlistę
+        // Załaduj playlistę — ale NIE odtwarzaj jeszcze
         val mediaItems = playlistUrls.map { MediaItem.fromUri(it) }
         player.setMediaItems(mediaItems, startIndex, 0)
         player.repeatMode = Player.REPEAT_MODE_OFF
         player.prepare()
-        player.play()
+        // NIE wywołujemy player.play() — czekamy na kliknięcie Play
 
         updateFileCounter()
         updateTitle()
-        statusLabel.text = getString(R.string.buffering)
+        statusLabel.text = getString(R.string.ready)
+        btnPlayPause.text = getString(R.string.play)
 
-        // Pełny ekran od razu
+        // Pełny ekran od razu, ale kontrolki widoczne
         enterFullscreen()
-        scheduleHideControls()
+        showControls()
+        hideHandler.removeCallbacks(hideRunnable)
     }
 
     // =========================================================================
-    // Playback controls
+    // Background Audio — wybór muzyki z urządzenia
+    // =========================================================================
+
+    private fun onAudioPicked(uri: Uri) {
+        // Zachowaj uprawnienia do odczytu
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {}
+
+        backgroundAudioUri = uri
+
+        // Stwórz / odśwież odtwarzacz audio w tle
+        audioPlayer?.release()
+        val ap = ExoPlayer.Builder(this).build()
+        ap.volume = 0.5f  // 50% głośności
+        ap.repeatMode = Player.REPEAT_MODE_ONE  // Zapętlaj muzykę
+
+        val mediaItem = MediaItem.fromUri(uri)
+        ap.setMediaItem(mediaItem)
+        ap.prepare()
+
+        audioPlayer = ap
+
+        // Pobierz nazwę pliku
+        val filename = getFilenameFromUri(uri)
+        audioLabel.text = getString(R.string.audio_format, filename)
+        statusLabel.text = "Muzyka w tle: $filename"
+
+        // Jeśli wideo jest odtwarzane, uruchom audio natychmiast
+        if (player.isPlaying) {
+            ap.play()
+        }
+    }
+
+    private fun getFilenameFromUri(uri: Uri): String {
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(
+                        android.provider.OpenableColumns.DISPLAY_NAME
+                    )
+                    if (nameIndex >= 0) {
+                        return cursor.getString(nameIndex)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return uri.lastPathSegment ?: "audio"
+    }
+
+    // =========================================================================
+    // Playback controls (z 5-sekundowym opóźnieniem)
     // =========================================================================
 
     private fun togglePlayPause() {
         if (player.isPlaying) {
+            // Pauza
             player.pause()
+            audioPlayer?.pause()
+            playHandler.removeCallbacksAndMessages(null)
+            btnPlayPause.text = getString(R.string.resume)
+            statusLabel.text = getString(R.string.paused)
             showControls()
+            hideHandler.removeCallbacks(hideRunnable)
         } else {
+            // Jeśli zakończono — przewiń na początek
             if (player.playbackState == Player.STATE_ENDED) {
                 player.seekTo(0, 0)
             }
+
+            // Ukryj kontrolki od razu
+            controlsPanel.visibility = View.GONE
+            controlsVisible = false
+
+            // Odliczanie 5 sekund
+            countdownSeconds = PLAY_DELAY_SECONDS
+            statusLabel.text = getString(R.string.start_countdown, countdownSeconds)
+            playHandler.removeCallbacksAndMessages(null)
+            startCountdown()
+        }
+    }
+
+    private fun startCountdown() {
+        if (countdownSeconds > 0) {
+            statusLabel.text = getString(R.string.start_countdown, countdownSeconds)
+            countdownSeconds--
+            playHandler.postDelayed({ startCountdown() }, 1000)
+        } else {
+            // Czas minął — uruchom odtwarzanie
             player.play()
-            scheduleHideControls()
+            audioPlayer?.let {
+                if (backgroundAudioUri != null) it.play()
+            }
+            btnPlayPause.text = getString(R.string.pause)
+            statusLabel.text = getString(R.string.streaming)
         }
     }
 
@@ -370,11 +482,15 @@ class StreamPlayerActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        // Anuluj odliczanie jeśli aktywne
+        playHandler.removeCallbacksAndMessages(null)
+
         if (isFullscreen) {
             toggleFullscreen()
         } else {
+            // Zatrzymaj audio w tle
+            audioPlayer?.stop()
             super.onBackPressed()
         }
     }
 }
-
