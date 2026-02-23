@@ -22,6 +22,16 @@
             android:textColor="@color/text_primary"
             android:textStyle="bold"
             android:gravity="center"
+            android:paddingBottom="2dp" />
+
+        <TextView
+            android:id="@+id/modeLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/mode_standard"
+            android:textSize="11sp"
+            android:textColor="@color/accent_blue"
+            android:gravity="center"
             android:paddingBottom="8dp" />
 
         <LinearLayout

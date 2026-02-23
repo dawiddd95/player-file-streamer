@@ -19,6 +19,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.google.android.material.button.MaterialButton
@@ -29,12 +30,18 @@ import com.google.android.material.button.MaterialButton
  * Cechy:
  * - Streamuje bez pobierania na dysk (tylko bufor w RAM)
  * - Obsługuje przewijanie (Range requests)
- * - Obsługuje playlisty (wiele plików)
+ * - Obsługuje playlisty (wiele plików) z zarządzaniem pamięcią
  * - Pełny ekran z automatycznym ukrywaniem kontrolek
  * - Zapętlanie / losowa kolejność
  * - Przejdź do następnego / poprzedniego pliku
  * - Muzyka w tle (drugi ExoPlayer) — wybór pliku audio z urządzenia
  * - Start z 5-sekundowym opóźnieniem po kliknięciu Play
+ *
+ * Zarządzanie pamięcią:
+ * - DefaultLoadControl ogranicza bufor do ~60s w przód, ~10s w tył
+ * - Sliding window: max ~55 elementów załadowanych w playerze jednocześnie
+ *   (50 w przód + 5 w tył od aktualnej pozycji)
+ * - Reszta playlisty trzymana jest jako lekkie tablice URL/nazw
  */
 class StreamPlayerActivity : AppCompatActivity() {
 
@@ -44,9 +51,21 @@ class StreamPlayerActivity : AppCompatActivity() {
         const val EXTRA_PLAYLIST_URLS = "playlist_urls"
         const val EXTRA_PLAYLIST_NAMES = "playlist_names"
         const val EXTRA_START_INDEX = "start_index"
+        const val EXTRA_MUTED = "muted"
 
         private const val HIDE_CONTROLS_DELAY = 3000L
         private const val PLAY_DELAY_SECONDS = 5
+
+        // ---- Zarządzanie pamięcią (buffer) ----
+        private const val MIN_BUFFER_MS = 15_000        // 15s — minimum do buforowania
+        private const val MAX_BUFFER_MS = 60_000        // 60s — max bufor w przód (~30–180 MB)
+        private const val BUFFER_PLAYBACK_MS = 2_500     // 2.5s — wystarczy żeby zacząć odtwarzanie
+        private const val BUFFER_REBUFFER_MS = 5_000     // 5s — po rebufferze
+        private const val BACK_BUFFER_MS = 10_000        // 10s — tył bufora, potem zwolnij RAM
+
+        // ---- Sliding window (playlista) ----
+        private const val WINDOW_AHEAD = 50              // Ładuj max 50 elementów w przód
+        private const val WINDOW_BEHIND = 5              // Trzymaj 5 elementów w tył
     }
 
     // --- Player ---
@@ -71,8 +90,10 @@ class StreamPlayerActivity : AppCompatActivity() {
     // --- State ---
     private var playlistUrls: Array<String> = emptyArray()
     private var playlistNames: Array<String> = emptyArray()
+    private var windowStart = 0   // Absolute index pierwszego elementu załadowanego w playerze
     private var isLooping = false
     private var isRandomMode = false
+    private var isMuted = false
     private var isFullscreen = false
     private var controlsVisible = true
     private var backgroundAudioUri: Uri? = null
@@ -97,6 +118,9 @@ class StreamPlayerActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
+
+        // Odczytaj tryb wyciszenia
+        isMuted = intent.getBooleanExtra(EXTRA_MUTED, false)
 
         initViews()
         initPlayer()
@@ -151,8 +175,27 @@ class StreamPlayerActivity : AppCompatActivity() {
 
     @OptIn(UnstableApi::class)
     private fun initPlayer() {
-        player = ExoPlayer.Builder(this).build()
+        // ── Ograniczenie buforowania — oszczędność RAM ──
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                MIN_BUFFER_MS,
+                MAX_BUFFER_MS,
+                BUFFER_PLAYBACK_MS,
+                BUFFER_REBUFFER_MS
+            )
+            .setBackBuffer(BACK_BUFFER_MS, false)  // Zwolnij dane po 10s za kursorem
+            .build()
+
+        player = ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
+            .build()
+
         playerView.player = player
+
+        // Wycisz wideo jeśli tryb bez dźwięku
+        if (isMuted) {
+            player.volume = 0f
+        }
 
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -164,7 +207,8 @@ class StreamPlayerActivity : AppCompatActivity() {
                     }
                     Player.STATE_READY -> {
                         if (player.isPlaying) {
-                            statusLabel.text = getString(R.string.streaming)
+                            statusLabel.text = if (isMuted) getString(R.string.streaming_muted)
+                                                else getString(R.string.streaming)
                         }
                     }
                     Player.STATE_BUFFERING -> {
@@ -179,7 +223,8 @@ class StreamPlayerActivity : AppCompatActivity() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
                     btnPlayPause.text = getString(R.string.pause)
-                    statusLabel.text = getString(R.string.streaming)
+                    statusLabel.text = if (isMuted) getString(R.string.streaming_muted)
+                                        else getString(R.string.streaming)
                     scheduleHideControls()
                 } else {
                     if (player.playbackState != Player.STATE_ENDED) {
@@ -190,6 +235,8 @@ class StreamPlayerActivity : AppCompatActivity() {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // ── Zarządzanie sliding window ──
+                managePlaylistWindow()
                 updateFileCounter()
                 updateTitle()
             }
@@ -227,7 +274,7 @@ class StreamPlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Load media (BEZ auto-play)
+    // Load media (BEZ auto-play) + sliding window
     // =========================================================================
 
     private fun loadFromIntent() {
@@ -250,11 +297,10 @@ class StreamPlayerActivity : AppCompatActivity() {
             playlistNames = arrayOf(title)
         }
 
-        // Załaduj playlistę — ale NIE odtwarzaj jeszcze
-        val mediaItems = playlistUrls.map { MediaItem.fromUri(it) }
-        player.setMediaItems(mediaItems, startIndex, 0)
+        // Załaduj okno playlisty wokół startIndex (BEZ auto-play)
+        loadPlaylistWindow(startIndex, 0)
+
         player.repeatMode = Player.REPEAT_MODE_OFF
-        player.prepare()
         // NIE wywołujemy player.play() — czekamy na kliknięcie Play
 
         updateFileCounter()
@@ -266,6 +312,65 @@ class StreamPlayerActivity : AppCompatActivity() {
         enterFullscreen()
         showControls()
         hideHandler.removeCallbacks(hideRunnable)
+    }
+
+    // =========================================================================
+    // Sliding window — zarządzanie pamięcią playlisty
+    // =========================================================================
+
+    /**
+     * Ładuje okno elementów do playera wokół [centerIndex].
+     * Ładuje max WINDOW_BEHIND elementów za i WINDOW_AHEAD przed aktualną pozycją.
+     */
+    private fun loadPlaylistWindow(centerIndex: Int, seekPosition: Long) {
+        val total = playlistUrls.size
+        windowStart = (centerIndex - WINDOW_BEHIND).coerceAtLeast(0)
+        val windowEnd = (centerIndex + WINDOW_AHEAD).coerceAtMost(total)
+
+        val mediaItems = (windowStart until windowEnd).map {
+            MediaItem.fromUri(playlistUrls[it])
+        }
+
+        val playerIndex = centerIndex - windowStart
+        player.setMediaItems(mediaItems, playerIndex, seekPosition)
+        player.prepare()
+    }
+
+    /**
+     * Dynamicznie dodaje/usuwa elementy w playerze żeby utrzymać okno
+     * wokół aktualnie odtwarzanego pliku. Wywoływane przy przejściu na nowy plik.
+     */
+    private fun managePlaylistWindow() {
+        val total = playlistUrls.size
+        // Przy małych playlistach nie ma co zarządzać
+        if (total <= WINDOW_AHEAD + WINDOW_BEHIND) return
+
+        val playerIdx = player.currentMediaItemIndex
+        val absIdx = windowStart + playerIdx
+
+        // 1. Doładuj elementy w przód jeśli potrzeba
+        val loadedEnd = windowStart + player.mediaItemCount
+        val desiredEnd = (absIdx + WINDOW_AHEAD).coerceAtMost(total)
+        for (i in loadedEnd until desiredEnd) {
+            player.addMediaItem(MediaItem.fromUri(playlistUrls[i]))
+        }
+
+        // 2. Usuń nadmiarowe elementy z tyłu (oszczędność pamięci)
+        //    Przy włączonym zapętlaniu NIE usuwamy — bo player musi wrócić na początek
+        if (!isLooping) {
+            val excess = playerIdx - WINDOW_BEHIND
+            if (excess > 0) {
+                player.removeMediaItems(0, excess)
+                windowStart += excess
+            }
+        }
+    }
+
+    /**
+     * Zwraca bezwzględny indeks aktualnego pliku w pełnej playliście.
+     */
+    private fun getAbsoluteIndex(): Int {
+        return windowStart + player.currentMediaItemIndex
     }
 
     // =========================================================================
@@ -348,7 +453,6 @@ class StreamPlayerActivity : AppCompatActivity() {
 
             // Odliczanie 5 sekund
             countdownSeconds = PLAY_DELAY_SECONDS
-            statusLabel.text = getString(R.string.start_countdown, countdownSeconds)
             playHandler.removeCallbacksAndMessages(null)
             startCountdown()
         }
@@ -366,13 +470,27 @@ class StreamPlayerActivity : AppCompatActivity() {
                 if (backgroundAudioUri != null) it.play()
             }
             btnPlayPause.text = getString(R.string.pause)
-            statusLabel.text = getString(R.string.streaming)
+            statusLabel.text = if (isMuted) getString(R.string.streaming_muted)
+                                else getString(R.string.streaming)
         }
     }
 
     private fun playNext() {
+        val absIdx = getAbsoluteIndex()
+
         if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
+        } else if (absIdx < playlistUrls.size - 1) {
+            // Jesteśmy na krawędzi okna — doładuj i spróbuj ponownie
+            managePlaylistWindow()
+            if (player.hasNextMediaItem()) {
+                player.seekToNextMediaItem()
+            }
+        } else if (isLooping && playlistUrls.size > 1) {
+            // Koniec playlisty z zapętleniem — wróć na początek
+            val wasPlaying = player.isPlaying
+            loadPlaylistWindow(0, 0)
+            if (wasPlaying) player.play()
         } else {
             Toast.makeText(this, getString(R.string.last_file), Toast.LENGTH_SHORT).show()
         }
@@ -382,8 +500,16 @@ class StreamPlayerActivity : AppCompatActivity() {
         if (player.hasPreviousMediaItem()) {
             player.seekToPreviousMediaItem()
         } else {
-            // Przewiń do początku
-            player.seekTo(0)
+            val absIdx = getAbsoluteIndex()
+            if (absIdx > 0) {
+                // Okno nie sięga dalej w tył — przeładuj z nowym centrum
+                val wasPlaying = player.isPlaying
+                loadPlaylistWindow(absIdx - 1, 0)
+                if (wasPlaying) player.play()
+            } else {
+                // Już na samym początku
+                player.seekTo(0)
+            }
         }
     }
 
@@ -395,6 +521,16 @@ class StreamPlayerActivity : AppCompatActivity() {
         isLooping = !isLooping
         player.repeatMode = if (isLooping) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
         btnLoop.text = getString(if (isLooping) R.string.loop_on else R.string.loop_off)
+
+        // Gdy włączamy pętlę, a okno nie zaczyna się od 0 — musimy dodać
+        // brakujące elementy na początku, bo player musi móc wrócić na start
+        if (isLooping && windowStart > 0) {
+            val missingItems = (0 until windowStart).map {
+                MediaItem.fromUri(playlistUrls[it])
+            }
+            player.addMediaItems(0, missingItems)
+            windowStart = 0
+        }
     }
 
     private fun toggleRandom() {
@@ -460,19 +596,19 @@ class StreamPlayerActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // UI Updates
+    // UI Updates (używa bezwzględnego indeksu, nie indeksu w oknie)
     // =========================================================================
 
     private fun updateFileCounter() {
         val total = playlistUrls.size
-        val current = if (total > 0) player.currentMediaItemIndex + 1 else 0
+        val current = if (total > 0) getAbsoluteIndex() + 1 else 0
         fileCounterLabel.text = getString(R.string.file_counter_format, current, total)
     }
 
     private fun updateTitle() {
-        val idx = player.currentMediaItemIndex
-        if (idx in playlistNames.indices) {
-            titleLabel.text = playlistNames[idx]
+        val absIdx = getAbsoluteIndex()
+        if (absIdx in playlistNames.indices) {
+            titleLabel.text = playlistNames[absIdx]
         }
     }
 
@@ -488,7 +624,6 @@ class StreamPlayerActivity : AppCompatActivity() {
         if (isFullscreen) {
             toggleFullscreen()
         } else {
-            // Zatrzymaj audio w tle
             audioPlayer?.stop()
             super.onBackPressed()
         }

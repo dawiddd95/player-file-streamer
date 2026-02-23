@@ -17,11 +17,12 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.google.android.material.button.MaterialButton
 import org.json.JSONArray
-import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.Collator
+import java.util.Locale
 
 /**
  * Ekran główny — przeglądarka plików na serwerze HTTP.
@@ -31,6 +32,8 @@ import java.net.URL
  * - pobrać listę plików z endpointu /api/files
  * - nawigować po katalogach
  * - kliknąć plik, by streamować go w ExoPlayer
+ *
+ * Obsługuje tryby sortowania i wyciszenia przekazane z LauncherActivity.
  *
  * Serwer powinien wystawiać:
  *   GET /api/files?path=          → JSON z listą plików/katalogów
@@ -58,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var statusLabel: TextView
     private lateinit var pathLabel: TextView
+    private lateinit var modeLabel: TextView
     private lateinit var btnBack: MaterialButton
     private lateinit var btnPlayAll: MaterialButton
 
@@ -65,6 +69,10 @@ class MainActivity : AppCompatActivity() {
     private var currentPath: String = ""
     private var fileList: MutableList<FileItem> = mutableListOf()
     private lateinit var adapter: FileAdapter
+
+    // --- Tryb odtwarzania (z LauncherActivity) ---
+    private var sortMode: Int = LauncherActivity.SORT_NATURAL
+    private var isMuted: Boolean = false
 
     // =========================================================================
     // Lifecycle
@@ -74,6 +82,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Odczytaj parametry trybu z Intentu
+        sortMode = intent.getIntExtra(LauncherActivity.EXTRA_SORT_MODE, LauncherActivity.SORT_NATURAL)
+        isMuted = intent.getBooleanExtra(LauncherActivity.EXTRA_MUTED, false)
+
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         initViews()
@@ -82,6 +94,13 @@ class MainActivity : AppCompatActivity() {
         // Przywróć ostatni adres
         val savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.1.100:8080") ?: ""
         urlInput.setText(savedUrl)
+
+        // Pokaż aktywny tryb
+        modeLabel.text = when {
+            isMuted -> getString(R.string.mode_muted)
+            sortMode == LauncherActivity.SORT_LOCALE -> getString(R.string.mode_windows)
+            else -> getString(R.string.mode_standard)
+        }
     }
 
     // =========================================================================
@@ -96,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.progressBar)
         statusLabel = findViewById(R.id.statusLabel)
         pathLabel = findViewById(R.id.pathLabel)
+        modeLabel = findViewById(R.id.modeLabel)
         btnBack = findViewById(R.id.btnBack)
         btnPlayAll = findViewById(R.id.btnPlayAll)
 
@@ -249,6 +269,69 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
+    // Sortowanie plików multimedialnych wg trybu
+    // =========================================================================
+
+    /**
+     * Sortuje pliki multimedialne wg wybranego trybu.
+     * - SORT_NATURAL: sortowanie naturalne (1, 2, 10)
+     * - SORT_LOCALE: sortowanie jak w Windows (Collator z bieżącym locale)
+     */
+    private fun sortMediaFiles(files: List<FileItem>): List<FileItem> {
+        return when (sortMode) {
+            LauncherActivity.SORT_LOCALE -> {
+                val collator = Collator.getInstance()
+                files.sortedWith(compareBy(collator) { it.name })
+            }
+            else -> {
+                // Sortowanie naturalne: 1, 2, 10 (nie 1, 10, 2)
+                files.sortedWith(compareBy { naturalSortKey(it.name) })
+            }
+        }
+    }
+
+    /**
+     * Klucz sortowania naturalnego — uwzględnia liczby w nazwie pliku.
+     * Przykład: "video2.mp4" < "video10.mp4"
+     */
+    private fun naturalSortKey(filename: String): NaturalSortKey {
+        val lower = filename.lowercase(Locale.ROOT)
+        val parts = mutableListOf<Comparable<*>>()
+        val regex = Regex("(\\d+)")
+        var lastEnd = 0
+
+        for (match in regex.findAll(lower)) {
+            if (match.range.first > lastEnd) {
+                parts.add(lower.substring(lastEnd, match.range.first))
+            }
+            parts.add(match.value.toLongOrNull() ?: 0L)
+            lastEnd = match.range.last + 1
+        }
+        if (lastEnd < lower.length) {
+            parts.add(lower.substring(lastEnd))
+        }
+        return NaturalSortKey(parts)
+    }
+
+    private class NaturalSortKey(private val parts: List<Comparable<*>>) : Comparable<NaturalSortKey> {
+        override fun compareTo(other: NaturalSortKey): Int {
+            for (i in 0 until minOf(parts.size, other.parts.size)) {
+                val a = parts[i]
+                val b = other.parts[i]
+                @Suppress("UNCHECKED_CAST")
+                val cmp = when {
+                    a is String && b is String -> a.compareTo(b)
+                    a is Long && b is Long -> a.compareTo(b)
+                    a is String -> -1
+                    else -> 1
+                }
+                if (cmp != 0) return cmp
+            }
+            return parts.size.compareTo(other.parts.size)
+        }
+    }
+
+    // =========================================================================
     // Odtwarzanie
     // =========================================================================
 
@@ -261,10 +344,13 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, StreamPlayerActivity::class.java).apply {
             putExtra(StreamPlayerActivity.EXTRA_STREAM_URL, streamUrl)
             putExtra(StreamPlayerActivity.EXTRA_TITLE, item.name)
+            putExtra(StreamPlayerActivity.EXTRA_MUTED, isMuted)
         }
 
-        // Przekaż playlistę (wszystkie pliki multimedialne w katalogu)
-        val mediaFiles = fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        // Pliki multimedialne w katalogu — posortowane wg wybranego trybu
+        val mediaFiles = sortMediaFiles(
+            fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        )
         val urls = mediaFiles.map { f ->
             val p = if (currentPath.isEmpty()) f.name else "$currentPath/${f.name}"
             "$baseUrl/media/${p.replace(" ", "%20")}"
@@ -281,7 +367,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playAllFiles() {
-        val mediaFiles = fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        val mediaFiles = sortMediaFiles(
+            fileList.filter { !it.isDirectory && isMediaFile(it.name) }
+        )
         if (mediaFiles.isEmpty()) {
             Toast.makeText(this, getString(R.string.no_media_files), Toast.LENGTH_SHORT).show()
             return
@@ -309,4 +397,3 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
-

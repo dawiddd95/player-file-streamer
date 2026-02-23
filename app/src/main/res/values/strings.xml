@@ -2,6 +2,16 @@
 <resources>
     <string name="app_name">Player File Streamer</string>
 
+    <!-- Launcher screen -->
+    <string name="choose_mode_title">Wybierz tryb odtwarzania:</string>
+    <string name="btn_standard">▶ Odtwarzacz standardowy\n(sortuje po nazwie: 1, 2, 10)</string>
+    <string name="btn_windows_sort">▶ Sortowanie jak w Windows\n(sortuje: 1, 10, 2)</string>
+    <string name="btn_muted">🔇 Wideo bez dźwięku\n(sortowanie jak w Windows)</string>
+    <string name="mode_standard">Tryb: Standardowy</string>
+    <string name="mode_windows">Tryb: Sortowanie Windows</string>
+    <string name="mode_muted">Tryb: Bez dźwięku</string>
+    <string name="streaming_muted">Streaming… (bez dźwięku)</string>
+
     <!-- Main screen -->
     <string name="url_hint">http://192.168.1.100:8080</string>
     <string name="connect">🔗 Połącz</string>
